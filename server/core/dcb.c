@@ -432,7 +432,11 @@ dcb_free_all_memory(DCB *dcb)
         gwbuf_free(dcb->dcb_readqueue);
         dcb->dcb_readqueue = NULL;
     }
-
+    if (dcb->dcb_fakequeue)
+    {
+        gwbuf_free(dcb->dcb_fakequeue);
+        dcb->dcb_fakequeue = NULL;
+    }
     spinlock_acquire(&dcb->cb_lock);
     while ((cb_dcb = dcb->callbacks) != NULL)
     {
@@ -928,11 +932,15 @@ int dcb_read(DCB   *dcb,
 
     if (dcb->dcb_readqueue)
     {
-        spinlock_acquire(&dcb->authlock);
         *head = gwbuf_append(*head, dcb->dcb_readqueue);
         dcb->dcb_readqueue = NULL;
         nreadtotal = gwbuf_length(*head);
-        spinlock_release(&dcb->authlock);
+    }
+    else if (dcb->dcb_fakequeue)
+    {
+        *head = gwbuf_append(*head, dcb->dcb_fakequeue);
+        dcb->dcb_fakequeue = NULL;
+        nreadtotal = gwbuf_length(*head);
     }
 
     if (SSL_HANDSHAKE_DONE == dcb->ssl_state || SSL_ESTABLISHED == dcb->ssl_state)
@@ -1704,7 +1712,7 @@ dcb_grab_writeq(DCB *dcb, bool first_time)
 
     if (first_time && dcb->ssl_read_want_write)
     {
-        poll_fake_event(dcb, EPOLLIN);
+        poll_fake_read_event(dcb);
     }
 
     if (first_time && dcb->draining_flag)
@@ -3602,7 +3610,5 @@ dcb_role_name(DCB *dcb)
  */
 void dcb_append_readqueue(DCB *dcb, GWBUF *buffer)
 {
-    spinlock_acquire(&dcb->authlock);
     dcb->dcb_readqueue = gwbuf_append(dcb->dcb_readqueue, buffer);
-    spinlock_release(&dcb->authlock);
 }
