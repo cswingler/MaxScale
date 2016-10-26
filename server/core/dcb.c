@@ -1137,18 +1137,13 @@ dcb_basic_read_SSL(DCB *dcb, int *nsingleread)
             *nsingleread = -1;
             return NULL;
         }
-        spinlock_acquire(&dcb->writeqlock);
+
         /* If we were in a retry situation, need to clear flag and attempt write */
         if (dcb->ssl_read_want_write || dcb->ssl_read_want_read)
         {
             dcb->ssl_read_want_write = false;
             dcb->ssl_read_want_read = false;
-            spinlock_release(&dcb->writeqlock);
             dcb_drain_writeq(dcb);
-        }
-        else
-        {
-            spinlock_release(&dcb->writeqlock);
         }
         break;
 
@@ -1168,10 +1163,8 @@ dcb_basic_read_SSL(DCB *dcb, int *nsingleread)
                   pthread_self(),
                   __func__
                 );
-        spinlock_acquire(&dcb->writeqlock);
         dcb->ssl_read_want_write = false;
         dcb->ssl_read_want_read = true;
-        spinlock_release(&dcb->writeqlock);
         *nsingleread = 0;
         break;
 
@@ -1181,10 +1174,8 @@ dcb_basic_read_SSL(DCB *dcb, int *nsingleread)
                   pthread_self(),
                   __func__
                 );
-        spinlock_acquire(&dcb->writeqlock);
         dcb->ssl_read_want_write = true;
         dcb->ssl_read_want_read = false;
-        spinlock_release(&dcb->writeqlock);
         *nsingleread = 0;
         break;
 
@@ -1268,7 +1259,6 @@ dcb_write(DCB *dcb, GWBUF *queue)
         return 0;
     }
 
-    spinlock_acquire(&dcb->writeqlock);
     empty_queue = (dcb->writeq == NULL);
     /*
      * Add our data to the write queue.  If the queue already had data,
@@ -1276,10 +1266,10 @@ dcb_write(DCB *dcb, GWBUF *queue)
      * If it did not already have data, we call the drain write queue
      * function immediately to attempt to write the data.
      */
-    atomic_add(&dcb->writeqlen, gwbuf_length(queue));
+    dcb->writeqlen += gwbuf_length(queue);
     dcb->writeq = gwbuf_append(dcb->writeq, queue);
-    spinlock_release(&dcb->writeqlock);
     dcb->stats.n_buffered++;
+
     MXS_DEBUG("%lu [dcb_write] Append to writequeue. %d writes "
               "buffered for dcb %p in state %s fd %d",
               pthread_self(),
@@ -1537,7 +1527,6 @@ dcb_drain_writeq(DCB *dcb)
              */
             if (stop_writing)
             {
-                spinlock_acquire(&dcb->writeqlock);
                 dcb->writeq = gwbuf_append(local_writeq, dcb->writeq);
 
                 if (dcb->drain_called_while_busy)
@@ -1545,13 +1534,11 @@ dcb_drain_writeq(DCB *dcb)
                     local_writeq = dcb->writeq;
                     dcb->writeq = NULL;
                     dcb->drain_called_while_busy = false;
-                    spinlock_release(&dcb->writeqlock);
                     continue;
                 }
                 else
                 {
                     dcb->draining_flag = false;
-                    spinlock_release(&dcb->writeqlock);
                     goto wrap_up;
                 }
             }
@@ -1575,7 +1562,7 @@ wrap_up:
      */
     if (total_written)
     {
-        atomic_add(&dcb->writeqlen, -total_written);
+        dcb->writeqlen -= total_written;
 
         /* Check if the draining has taken us from above water to below water */
         if (above_water && dcb->writeqlen < dcb->low_water)
@@ -1609,7 +1596,6 @@ static GWBUF *
 dcb_grab_writeq(DCB *dcb, bool first_time)
 {
     GWBUF *local_writeq = NULL;
-    spinlock_acquire(&dcb->writeqlock);
 
     if (first_time && dcb->ssl_read_want_write)
     {
@@ -1626,7 +1612,7 @@ dcb_grab_writeq(DCB *dcb, bool first_time)
         dcb->draining_flag = local_writeq ? true : false;
         dcb->writeq = NULL;
     }
-    spinlock_release(&dcb->writeqlock);
+
     return local_writeq;
 }
 
